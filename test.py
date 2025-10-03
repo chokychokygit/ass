@@ -760,6 +760,47 @@ def explore_with_ogm(scanner, movement_controller, attitude_handler, occupancy_m
     print("\n🎉 === EXPLORATION PHASE FINISHED ===")
 
 # =============================================================================
+# =============================================================================
+# ===== JSON SAVING UTILITY ===================================================
+# =============================================================================
+def save_map_to_json(occupancy_map, filename="Mapping_Top.json"):
+    """
+    Emergency-safe function to save the occupancy map to JSON.
+    Can be called at any time, even during errors or interrupts.
+    """
+    try:
+        final_map_data = {'nodes': []}
+        for r in range(occupancy_map.height):
+            for c in range(occupancy_map.width):
+                cell = occupancy_map.grid[r][c]
+                cell_data = {
+                    "coordinate": {"row": r, "col": c},
+                    "probability": round(cell.get_node_probability(), 3),
+                    "is_occupied": cell.is_node_occupied(),
+                    "walls": {
+                        "north": cell.walls['N'].is_occupied(),
+                        "south": cell.walls['S'].is_occupied(),
+                        "east": cell.walls['E'].is_occupied(),
+                        "west": cell.walls['W'].is_occupied()
+                    },
+                    "wall_probabilities": {
+                        "north": round(cell.walls['N'].get_probability(), 3),
+                        "south": round(cell.walls['S'].get_probability(), 3),
+                        "east": round(cell.walls['E'].get_probability(), 3),
+                        "west": round(cell.walls['W'].get_probability(), 3)
+                    }
+                }
+                final_map_data["nodes"].append(cell_data)
+        
+        with open(filename, "w") as f:
+            json.dump(final_map_data, f, indent=2)
+        
+        print(f"✅ Map data saved to {filename}")
+        return True
+    except Exception as e:
+        print(f"❌ Error saving map to JSON: {e}")
+        return False
+
 # ===== MAIN EXECUTION BLOCK ==================================================
 # =============================================================================
 if __name__ == '__main__':
@@ -797,8 +838,15 @@ if __name__ == '__main__':
             else:
                 print(f"⚠️ Could not find a path from {CURRENT_POSITION} to {TARGET_DESTINATION}.")
         
-    except KeyboardInterrupt: print("\n⚠️ User interrupted exploration.")
-    except Exception as e: print(f"\n⚌ An error occurred: {e}"); traceback.print_exc()
+    except KeyboardInterrupt:
+        print("\n⚠️ User interrupted exploration.")
+        print("💾 Saving data before exit...")
+        save_map_to_json(occupancy_map, "Mapping_Top_EMERGENCY.json")
+    except Exception as e:
+        print(f"\n⚌ An error occurred: {e}")
+        traceback.print_exc()
+        print("💾 Saving data before exit...")
+        save_map_to_json(occupancy_map, "Mapping_Top_EMERGENCY.json")
     finally:
         if ep_robot:
             print("🔌 Cleaning up and closing connection...")
@@ -808,37 +856,8 @@ if __name__ == '__main__':
             ep_robot.close()
             print("🔌 Connection closed.")
         
-        final_map_data = {
-            'nodes': []
-        }
-        for r in range(occupancy_map.height):
-            for c in range(occupancy_map.width):
-                cell = occupancy_map.grid[r][c]
-                cell_data = {
-                    "coordinate": {
-                        "row": r,
-                        "col": c
-                    },
-                    "probability": round(cell.get_node_probability(), 3),
-                    "is_occupied": cell.is_node_occupied(),
-                    "walls": {
-                        "north": cell.walls['N'].is_occupied(),
-                        "south": cell.walls['S'].is_occupied(),
-                        "east": cell.walls['E'].is_occupied(),
-                        "west": cell.walls['W'].is_occupied()
-                    },
-                    "wall_probabilities": {
-                        "north": round(cell.walls['N'].get_probability(), 3),
-                        "south": round(cell.walls['S'].get_probability(), 3),
-                        "east": round(cell.walls['E'].get_probability(), 3),
-                        "west": round(cell.walls['W'].get_probability(), 3)
-                    }
-                }
-                final_map_data["nodes"].append(cell_data)
-
-        with open("Mapping_Top.json", "w") as f:
-            json.dump(final_map_data, f, indent=2)
-
+        # Save the final map data
+        save_map_to_json(occupancy_map, "Mapping_Top.json")
         print("✅ Final Hybrid Belief Map (with walls) saved to Mapping_Top.json")
         print("... You can close the plot window now ...")
         plt.ioff()
