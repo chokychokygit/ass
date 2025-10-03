@@ -10,6 +10,10 @@ import matplotlib.pyplot as plt
 from collections import deque
 import traceback
 import statistics
+import sys
+import atexit
+import signal
+import os
 
 # =============================================================================
 # ===== CONFIGURATION & PARAMETERS ============================================
@@ -72,6 +76,9 @@ LOG_ODDS_FREE = {
 OCCUPANCY_THRESHOLD = 0.7
 FREE_THRESHOLD = 0.3
 
+# --- Global reference for emergency-save handlers ---
+GLOBAL_OCCUPANCY_MAP = None
+
 # =============================================================================
 # ===== HELPER FUNCTIONS ======================================================
 # =============================================================================
@@ -101,6 +108,52 @@ def get_compensated_target_yaw():
     This function is now the single source of truth for the robot's target heading.
     """
     return CURRENT_TARGET_YAW + IMU_DRIFT_COMPENSATION_DEG
+
+# =============================================================================
+# ===== EMERGENCY SAVE UTILITIES ==============================================
+# =============================================================================
+def build_final_map_data(occupancy_map):
+    """Builds the final JSON-serializable map data from the occupancy map."""
+    final_map_data = { 'nodes': [] }
+    for r in range(occupancy_map.height):
+        for c in range(occupancy_map.width):
+            cell = occupancy_map.grid[r][c]
+            cell_data = {
+                "coordinate": { "row": r, "col": c },
+                "probability": round(cell.get_node_probability(), 3),
+                "is_occupied": cell.is_node_occupied(),
+                "walls": {
+                    "north": cell.walls['N'].is_occupied(),
+                    "south": cell.walls['S'].is_occupied(),
+                    "east":  cell.walls['E'].is_occupied(),
+                    "west":  cell.walls['W'].is_occupied(),
+                },
+                "wall_probabilities": {
+                    "north": round(cell.walls['N'].get_probability(), 3),
+                    "south": round(cell.walls['S'].get_probability(), 3),
+                    "east":  round(cell.walls['E'].get_probability(), 3),
+                    "west":  round(cell.walls['W'].get_probability(), 3),
+                },
+            }
+            final_map_data["nodes"].append(cell_data)
+    return final_map_data
+
+def emergency_save_json(occupancy_map, filename="Mapping_Top.json", reason="unknown"):
+    """Safely saves the map JSON even during interrupts or exceptions."""
+    try:
+        if occupancy_map is None:
+            print(f"⚠️ Emergency save skipped: occupancy_map is None ({reason}).")
+            return
+        data = build_final_map_data(occupancy_map)
+        tmp_filename = filename + ".tmp"
+        with open(tmp_filename, "w") as f:
+            json.dump(data, f, indent=2)
+            f.flush()
+            os.fsync(f.fileno())
+        os.replace(tmp_filename, filename)
+        print(f"💾 Emergency map saved to {filename} ({reason}).")
+    except Exception as e:
+        print(f"❌ Emergency save failed ({reason}): {e}")
 
 # =============================================================================
 # ===== OCCUPANCY GRID MAP & VISUALIZATION (from map_suay.py) =================
@@ -765,11 +818,31 @@ def explore_with_ogm(scanner, movement_controller, attitude_handler, occupancy_m
 if __name__ == '__main__':
     ep_robot = None
     occupancy_map = OccupancyGridMap(width=3, height=3)
+    GLOBAL_OCCUPANCY_MAP = occupancy_map
     attitude_handler = AttitudeHandler()
     movement_controller = None
     scanner = None
     ep_chassis = None
     
+    # Register emergency save handlers as early as possible
+    def _atexit_save():
+        emergency_save_json(GLOBAL_OCCUPANCY_MAP, filename="Mapping_Top.json", reason="atexit")
+    atexit.register(_atexit_save)
+
+    def _handle_signal(signum, frame):
+        emergency_save_json(GLOBAL_OCCUPANCY_MAP, filename="Mapping_Top.json", reason=f"signal {signum}")
+        # Re-raise default behavior after saving
+        signal.signal(signum, signal.SIG_DFL)
+        os.kill(os.getpid(), signum)
+    try:
+        signal.signal(signal.SIGINT, _handle_signal)
+    except Exception:
+        pass
+    try:
+        signal.signal(signal.SIGTERM, _handle_signal)
+    except Exception:
+        pass
+
     try:
         visualizer = RealTimeVisualizer(grid_size=3, target_dest=TARGET_DESTINATION)
         print("🤖 Connecting to robot..."); ep_robot = robot.Robot(); ep_robot.initialize(conn_type="ap")
@@ -797,47 +870,35 @@ if __name__ == '__main__':
             else:
                 print(f"⚠️ Could not find a path from {CURRENT_POSITION} to {TARGET_DESTINATION}.")
         
-    except KeyboardInterrupt: print("\n⚠️ User interrupted exploration.")
-    except Exception as e: print(f"\n⚌ An error occurred: {e}"); traceback.print_exc()
+    except KeyboardInterrupt:
+        print("\n⚠️ User interrupted exploration.")
+        emergency_save_json(GLOBAL_OCCUPANCY_MAP, filename="Mapping_Top.json", reason="KeyboardInterrupt")
+    except Exception as e:
+        print(f"\n⚌ An error occurred: {e}"); traceback.print_exc()
+        emergency_save_json(GLOBAL_OCCUPANCY_MAP, filename="Mapping_Top.json", reason="Exception")
     finally:
         if ep_robot:
             print("🔌 Cleaning up and closing connection...")
-            if scanner: scanner.cleanup()
-            if attitude_handler and attitude_handler.is_monitoring: attitude_handler.stop_monitoring(ep_chassis)
-            if movement_controller: movement_controller.cleanup()
-            ep_robot.close()
+            try:
+                if scanner: scanner.cleanup()
+            except Exception:
+                pass
+            try:
+                if attitude_handler and attitude_handler.is_monitoring: attitude_handler.stop_monitoring(ep_chassis)
+            except Exception:
+                pass
+            try:
+                if movement_controller: movement_controller.cleanup()
+            except Exception:
+                pass
+            try:
+                ep_robot.close()
+            except Exception:
+                pass
             print("🔌 Connection closed.")
-        
-        final_map_data = {
-            'nodes': []
-        }
-        for r in range(occupancy_map.height):
-            for c in range(occupancy_map.width):
-                cell = occupancy_map.grid[r][c]
-                cell_data = {
-                    "coordinate": {
-                        "row": r,
-                        "col": c
-                    },
-                    "probability": round(cell.get_node_probability(), 3),
-                    "is_occupied": cell.is_node_occupied(),
-                    "walls": {
-                        "north": cell.walls['N'].is_occupied(),
-                        "south": cell.walls['S'].is_occupied(),
-                        "east": cell.walls['E'].is_occupied(),
-                        "west": cell.walls['W'].is_occupied()
-                    },
-                    "wall_probabilities": {
-                        "north": round(cell.walls['N'].get_probability(), 3),
-                        "south": round(cell.walls['S'].get_probability(), 3),
-                        "east": round(cell.walls['E'].get_probability(), 3),
-                        "west": round(cell.walls['W'].get_probability(), 3)
-                    }
-                }
-                final_map_data["nodes"].append(cell_data)
 
-        with open("Mapping_Top.json", "w") as f:
-            json.dump(final_map_data, f, indent=2)
+        # Always attempt a final save using the consolidated utility
+        emergency_save_json(GLOBAL_OCCUPANCY_MAP, filename="Mapping_Top.json", reason="finally")
 
         print("✅ Final Hybrid Belief Map (with walls) saved to Mapping_Top.json")
         print("... You can close the plot window now ...")
