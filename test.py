@@ -1,8 +1,12 @@
 # -*-coding:utf-8-*-
 
 import time
-import robomaster
-from robomaster import robot
+try:
+    import robomaster
+    from robomaster import robot
+except Exception:
+    robomaster = None
+    robot = None
 import numpy as np
 import math
 import json
@@ -71,6 +75,20 @@ LOG_ODDS_FREE = {
 # --- Decision Thresholds ---
 OCCUPANCY_THRESHOLD = 0.7
 FREE_THRESHOLD = 0.3
+
+# =============================================================================
+# ===== SERIALIZATION HELPERS ==================================================
+# =============================================================================
+def classify_wall_tristate(probability: float):
+    """
+    Returns True if wall is confidently occupied, False if confidently free,
+    and None if unknown/ambiguous.
+    """
+    if probability > OCCUPANCY_THRESHOLD:
+        return True
+    if probability < FREE_THRESHOLD:
+        return False
+    return None
 
 # =============================================================================
 # ===== HELPER FUNCTIONS ======================================================
@@ -769,70 +787,89 @@ if __name__ == '__main__':
     movement_controller = None
     scanner = None
     ep_chassis = None
-    
+    ep_gimbal = None
+    ep_tof_sensor = None
+    ep_sensor_adaptor = None
+
     try:
         visualizer = RealTimeVisualizer(grid_size=3, target_dest=TARGET_DESTINATION)
-        print("🤖 Connecting to robot..."); ep_robot = robot.Robot(); ep_robot.initialize(conn_type="ap")
-        ep_chassis, ep_gimbal = ep_robot.chassis, ep_robot.gimbal
-        ep_tof_sensor, ep_sensor_adaptor = ep_robot.sensor, ep_robot.sensor_adaptor
-        
-        print(" GIMBAL: Centering gimbal..."); ep_gimbal.moveto(pitch=0, yaw=0, yaw_speed=SPEED_ROTATE).wait_for_completed()
-        
-        scanner = EnvironmentScanner(ep_sensor_adaptor, ep_tof_sensor, ep_gimbal, ep_chassis)
-        movement_controller = MovementController(ep_chassis)
-        attitude_handler.start_monitoring(ep_chassis)
-        
-        explore_with_ogm(scanner, movement_controller, attitude_handler, occupancy_map, visualizer)
-        
-        print(f"\n\n--- NAVIGATION TO TARGET PHASE: From {CURRENT_POSITION} to {TARGET_DESTINATION} ---")
-        
-        if CURRENT_POSITION == TARGET_DESTINATION:
-            print("🎉 Robot is already at the target destination!")
+        if robot is None:
+            print("🤖 robomaster not available. Running in offline mode (simulation for export only)...")
         else:
-            path_to_target = find_path_bfs(occupancy_map, CURRENT_POSITION, TARGET_DESTINATION)
-            if path_to_target and len(path_to_target) > 1:
-                print(f"✅ Path found to target: {path_to_target}")
-                execute_path(path_to_target, movement_controller, attitude_handler, scanner, visualizer, occupancy_map, path_name="Final Navigation")
-                print(f"🎉🎉 Robot has arrived at the target destination: {TARGET_DESTINATION}!")
+            print("🤖 Connecting to robot...")
+            ep_robot = robot.Robot()
+            ep_robot.initialize(conn_type="ap")
+            ep_chassis, ep_gimbal = ep_robot.chassis, ep_robot.gimbal
+            ep_tof_sensor, ep_sensor_adaptor = ep_robot.sensor, ep_robot.sensor_adaptor
+            print(" GIMBAL: Centering gimbal...")
+            ep_gimbal.moveto(pitch=0, yaw=0, yaw_speed=SPEED_ROTATE).wait_for_completed()
+            scanner = EnvironmentScanner(ep_sensor_adaptor, ep_tof_sensor, ep_gimbal, ep_chassis)
+            movement_controller = MovementController(ep_chassis)
+            attitude_handler.start_monitoring(ep_chassis)
+
+        if scanner and movement_controller:
+            explore_with_ogm(scanner, movement_controller, attitude_handler, occupancy_map, visualizer)
+            print(f"\n\n--- NAVIGATION TO TARGET PHASE: From {CURRENT_POSITION} to {TARGET_DESTINATION} ---")
+            if CURRENT_POSITION == TARGET_DESTINATION:
+                print("🎉 Robot is already at the target destination!")
             else:
-                print(f"⚠️ Could not find a path from {CURRENT_POSITION} to {TARGET_DESTINATION}.")
-        
-    except KeyboardInterrupt: print("\n⚠️ User interrupted exploration.")
-    except Exception as e: print(f"\n⚌ An error occurred: {e}"); traceback.print_exc()
+                path_to_target = find_path_bfs(occupancy_map, CURRENT_POSITION, TARGET_DESTINATION)
+                if path_to_target and len(path_to_target) > 1:
+                    print(f"✅ Path found to target: {path_to_target}")
+                    execute_path(path_to_target, movement_controller, attitude_handler, scanner, visualizer, occupancy_map, path_name="Final Navigation")
+                    print(f"🎉🎉 Robot has arrived at the target destination: {TARGET_DESTINATION}!")
+                else:
+                    print(f"⚠️ Could not find a path from {CURRENT_POSITION} to {TARGET_DESTINATION}.")
+        else:
+            # In offline mode, we still export the initial empty map for verification
+            print("📝 Offline export of current map state...")
+
+    except KeyboardInterrupt:
+        print("\n⚠️ User interrupted exploration.")
+    except Exception as e:
+        print(f"\n⚌ An error occurred: {e}")
+        traceback.print_exc()
     finally:
         if ep_robot:
             print("🔌 Cleaning up and closing connection...")
-            if scanner: scanner.cleanup()
-            if attitude_handler and attitude_handler.is_monitoring: attitude_handler.stop_monitoring(ep_chassis)
-            if movement_controller: movement_controller.cleanup()
+            if scanner:
+                scanner.cleanup()
+            if attitude_handler and attitude_handler.is_monitoring:
+                attitude_handler.stop_monitoring(ep_chassis)
+            if movement_controller:
+                movement_controller.cleanup()
             ep_robot.close()
             print("🔌 Connection closed.")
-        
+
+        # Always export the map for verification
         final_map_data = {
             'nodes': []
         }
         for r in range(occupancy_map.height):
             for c in range(occupancy_map.width):
                 cell = occupancy_map.grid[r][c]
+                n_prob = cell.walls['N'].get_probability()
+                s_prob = cell.walls['S'].get_probability()
+                e_prob = cell.walls['E'].get_probability()
+                w_prob = cell.walls['W'].get_probability()
+
                 cell_data = {
-                    "coordinate": {
-                        "row": r,
-                        "col": c
-                    },
+                    "coordinate": {"row": r, "col": c},
                     "probability": round(cell.get_node_probability(), 3),
                     "is_occupied": cell.is_node_occupied(),
+                    # Tri-state walls: True/False/None
                     "walls": {
-                        "north": cell.walls['N'].is_occupied(),
-                        "south": cell.walls['S'].is_occupied(),
-                        "east": cell.walls['E'].is_occupied(),
-                        "west": cell.walls['W'].is_occupied()
+                        "north": classify_wall_tristate(n_prob),
+                        "south": classify_wall_tristate(s_prob),
+                        "east": classify_wall_tristate(e_prob),
+                        "west": classify_wall_tristate(w_prob),
                     },
                     "wall_probabilities": {
-                        "north": round(cell.walls['N'].get_probability(), 3),
-                        "south": round(cell.walls['S'].get_probability(), 3),
-                        "east": round(cell.walls['E'].get_probability(), 3),
-                        "west": round(cell.walls['W'].get_probability(), 3)
-                    }
+                        "north": round(n_prob, 3),
+                        "south": round(s_prob, 3),
+                        "east": round(e_prob, 3),
+                        "west": round(w_prob, 3),
+                    },
                 }
                 final_map_data["nodes"].append(cell_data)
 
@@ -842,4 +879,7 @@ if __name__ == '__main__':
         print("✅ Final Hybrid Belief Map (with walls) saved to Mapping_Top.json")
         print("... You can close the plot window now ...")
         plt.ioff()
-        plt.show()
+        try:
+            plt.show()
+        except Exception:
+            pass
