@@ -603,8 +603,7 @@ def execute_path(path, movement_controller, attitude_handler, scanner, visualize
         
         if i + 1 < len(path):
             next_r, next_c = path[i+1]
-            dr, dc = next_r - current_c, next_c - current_c # <--- ผมสังเกตเห็นบั๊กเล็กๆ ตรงนี้ด้วยครับ ควรจะเป็น dr, dc = next_r - current_r, next_c - current_c
-            dr, dc = next_r - current_r, next_c - current_c # แก้ไขให้ถูกต้อง
+            dr, dc = next_r - current_r, next_c - current_c
             
             target_direction = dir_vectors_map[(dr, dc)]
             
